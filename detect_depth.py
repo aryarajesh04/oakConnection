@@ -164,17 +164,19 @@ qDepth = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
 # ---------------------------------------------------------------------------
 pipeline.start()
 
-# Focal length from device calibration (used for real-world width calculation)
+# Focal length + principal point from calibration (used for true 3D width)
 try:
     device     = pipeline.getDefaultDevice()
     calib      = device.readCalibration()
     intrinsics = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, IMGSZ, IMGSZ)
-    focal_px   = intrinsics[0][0]
-    print(f"Focal length from calibration: {focal_px:.1f} px")
+    focal_px   = intrinsics[0][0]   # fx
+    cx         = intrinsics[0][2]   # principal point x
+    print(f"Calibration: fx={focal_px:.1f} px  cx={cx:.1f} px")
 except Exception:
     HFOV_DEG = 73.0  # OAK-D Lite colour camera horizontal FOV fallback
     focal_px = (IMGSZ / 2) / math.tan(math.radians(HFOV_DEG / 2))
-    print(f"Focal length from FOV fallback ({HFOV_DEG}°): {focal_px:.1f} px")
+    cx       = IMGSZ / 2
+    print(f"Focal length from FOV fallback ({HFOV_DEG}°): fx={focal_px:.1f} px  cx={cx:.1f} px")
 
 start          = time.monotonic()
 frames         = 0
@@ -255,9 +257,17 @@ try:
             z_left   = sample_depth(x1,    cy_px)
             z_right  = sample_depth(x2,    cy_px)
 
-            # Real-world width via pinhole model: W = pixel_w * Z / fx
-            pixel_width = x2 - x1
-            width_mm    = int(pixel_width * z_centre / focal_px) if z_centre else 0
+            # True 3D width: unproject left/right edges to 3D, then Euclidean distance.
+            # X = (pixel - cx) * Z / fx  →  accounts for door being angled to camera.
+            if z_left and z_right:
+                X_left    = (x1 - cx) * z_left  / focal_px
+                X_right   = (x2 - cx) * z_right / focal_px
+                width_mm  = int(math.sqrt((X_right - X_left) ** 2 + (z_right - z_left) ** 2))
+            elif z_centre:
+                # Fallback: projected width using centre depth (accurate only if door faces camera)
+                width_mm  = int((x2 - x1) * z_centre / focal_px)
+            else:
+                width_mm  = 0
 
             # Angle of door relative to camera (positive = right side farther away)
             # sin(θ) = (z_right - z_left) / width_mm
