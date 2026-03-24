@@ -8,6 +8,7 @@ Usage:
 Press 'q' to quit.
 """
 
+import math
 import sys
 import time
 from pathlib import Path
@@ -163,6 +164,18 @@ qDepth = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
 # ---------------------------------------------------------------------------
 pipeline.start()
 
+# Focal length from device calibration (used for real-world width calculation)
+try:
+    device     = pipeline.getDefaultDevice()
+    calib      = device.readCalibration()
+    intrinsics = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, IMGSZ, IMGSZ)
+    focal_px   = intrinsics[0][0]
+    print(f"Focal length from calibration: {focal_px:.1f} px")
+except Exception:
+    HFOV_DEG = 73.0  # OAK-D Lite colour camera horizontal FOV fallback
+    focal_px = (IMGSZ / 2) / math.tan(math.radians(HFOV_DEG / 2))
+    print(f"Focal length from FOV fallback ({HFOV_DEG}°): {focal_px:.1f} px")
+
 start          = time.monotonic()
 frames         = 0
 fps            = 0.0
@@ -226,23 +239,44 @@ try:
             label = LABEL_MAP[label_idx] if label_idx < len(LABEL_MAP) else str(label_idx)
             color = LABEL_COLORS.get(label, WHITE)
 
-            # Sample depth at bbox centre (5 px radius patch)
-            cx_px = (x1 + x2) // 2
             cy_px = (y1 + y2) // 2
+            cx_px = (x1 + x2) // 2
             r     = 5
-            patch = depthFrame[
-                max(0, cy_px - r):min(h, cy_px + r),
-                max(0, cx_px - r):min(w, cx_px + r),
-            ]
-            valid = patch[(patch >= DEPTH_MIN_MM) & (patch <= DEPTH_MAX_MM)]
-            z_mm  = int(np.median(valid)) if valid.size else 0
 
-            print(f"  {label} {int(conf*100)}%  x1={bx1:.1f} y1={by1:.1f} x2={bx2:.1f} y2={by2:.1f}  Z={z_mm}mm ({z_mm/1000:.2f}m)", flush=True)
+            def sample_depth(px, py):
+                patch = depthFrame[
+                    max(0, py - r):min(h, py + r),
+                    max(0, px - r):min(w, px + r),
+                ]
+                valid = patch[(patch >= DEPTH_MIN_MM) & (patch <= DEPTH_MAX_MM)]
+                return int(np.median(valid)) if valid.size else 0
+
+            z_centre = sample_depth(cx_px, cy_px)
+            z_left   = sample_depth(x1,    cy_px)
+            z_right  = sample_depth(x2,    cy_px)
+
+            # Real-world width via pinhole model: W = pixel_w * Z / fx
+            pixel_width = x2 - x1
+            width_mm    = int(pixel_width * z_centre / focal_px) if z_centre else 0
+
+            # Angle of door relative to camera (positive = right side farther away)
+            # sin(θ) = (z_right - z_left) / width_mm
+            if width_mm and z_left and z_right:
+                sin_val   = max(-1.0, min(1.0, (z_right - z_left) / width_mm))
+                angle_deg = math.degrees(math.asin(sin_val))
+            else:
+                angle_deg = None
+
+            angle_str = f"{angle_deg:+.1f}°" if angle_deg is not None else "--"
+            print(f"  {label} {int(conf*100)}%  x1={bx1:.1f} y1={by1:.1f} x2={bx2:.1f} y2={by2:.1f}  "
+                  f"Z_left={z_left}mm  Z_centre={z_centre}mm  Z_right={z_right}mm  "
+                  f"W={width_mm}mm ({width_mm/1000:.2f}m)  angle={angle_str}", flush=True)
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             for i, text in enumerate([
                 f"{label}  {int(conf * 100)}%",
-                f"Z: {z_mm}mm  ({z_mm/1000:.2f}m)" if z_mm else "Z: --",
+                f"Z: L={z_left}  C={z_centre}  R={z_right}mm" if z_centre else "Z: --",
+                f"W: {width_mm}mm  angle: {angle_str}" if width_mm else "W: --",
             ]):
                 cv2.putText(frame, text, (x1 + 6, y1 + 18 + i * 16),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1)
