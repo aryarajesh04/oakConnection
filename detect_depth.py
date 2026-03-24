@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-detect_depth.py — Door detection with spatial depth on Luxonis OAK camera.
+detect_depth.py — Door detection on OAK-D Lite (blob on VPU + stereo depth).
 
 Usage:
     python detect_depth.py <path_to_best.blob>
@@ -26,7 +26,7 @@ LABEL_COLORS      = {
     "open":   (0,   220, 0  ),
     "semi":   (0,   200, 255),
 }
-CONFIDENCE_THRESH = 0.05
+CONFIDENCE_THRESH = 0.50
 IOU_THRESH        = 0.45
 NUM_CLASSES       = 3
 IMGSZ             = 640
@@ -70,18 +70,15 @@ def nms(boxes, scores, iou_thresh):
 
 def parse_yolov8(tensor, conf_thresh, iou_thresh, img_w, img_h):
     """
-    tensor: numpy array of shape (4+NUM_CLASSES, 8400) or (8400, 4+NUM_CLASSES).
+    tensor: numpy array shape (4+NUM_CLASSES, 8400) or (8400, 4+NUM_CLASSES).
     Returns list of (x1, y1, x2, y2, confidence, class_id) in pixel coords.
     """
     expected_rows = 4 + NUM_CLASSES
-    if tensor.ndim == 1:
-        try:
-            tensor = tensor.reshape(expected_rows, -1)
-        except ValueError:
-            tensor = tensor.reshape(-1, expected_rows).T
+    if tensor.ndim == 3:
+        tensor = tensor[0]
 
     if tensor.shape[0] != expected_rows:
-        tensor = tensor.T  # flip if needed
+        tensor = tensor.T
 
     scale_x = img_w / IMGSZ
     scale_y = img_h / IMGSZ
@@ -91,14 +88,14 @@ def parse_yolov8(tensor, conf_thresh, iou_thresh, img_w, img_h):
     bw = tensor[2] * scale_x
     bh = tensor[3] * scale_y
 
-    class_scores = tensor[4:4 + NUM_CLASSES]           # (NUM_CLASSES, 8400)
+    class_scores = tensor[4:4 + NUM_CLASSES]
     class_ids    = np.argmax(class_scores, axis=0)
     confidences  = class_scores[class_ids, np.arange(class_scores.shape[1])]
 
     mask = confidences >= conf_thresh
     cx, cy, bw, bh = cx[mask], cy[mask], bw[mask], bh[mask]
-    class_ids      = class_ids[mask]
-    confidences    = confidences[mask]
+    class_ids   = class_ids[mask]
+    confidences = confidences[mask]
 
     x1 = cx - bw / 2
     y1 = cy - bh / 2
@@ -127,20 +124,21 @@ def parse_yolov8(tensor, conf_thresh, iou_thresh, img_w, img_h):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline (depthai 3.x)
+# Pipeline
 # ---------------------------------------------------------------------------
 pipeline = dai.Pipeline()
 
-# Cameras
-camRgb    = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+# RGB camera
+camRgb = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+rgbOut = camRgb.requestOutput((IMGSZ, IMGSZ), dai.ImgFrame.Type.BGR888p)
+
+# Mono cameras for stereo depth
 monoLeft  = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
 monoRight = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+leftOut   = monoLeft.requestOutput((640, 480), dai.ImgFrame.Type.GRAY8)
+rightOut  = monoRight.requestOutput((640, 480), dai.ImgFrame.Type.GRAY8)
 
-rgbOut   = camRgb.requestOutput((IMGSZ, IMGSZ), dai.ImgFrame.Type.BGR888p)
-leftOut  = monoLeft.requestOutput((640, 400),   dai.ImgFrame.Type.GRAY8)
-rightOut = monoRight.requestOutput((640, 400),  dai.ImgFrame.Type.GRAY8)
-
-# Stereo depth
+# Stereo depth — aligned to RGB frame
 stereo = pipeline.create(dai.node.StereoDepth)
 stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
 stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
@@ -149,14 +147,13 @@ stereo.setOutputSize(IMGSZ, IMGSZ)
 leftOut.link(stereo.left)
 rightOut.link(stereo.right)
 
-# Neural network (plain — no built-in parser)
+# Neural network (blob on VPU)
 nn = pipeline.create(dai.node.NeuralNetwork)
 nn.setBlobPath(BLOB_PATH)
 nn.setNumInferenceThreads(2)
 nn.input.setBlocking(False)
 rgbOut.link(nn.input)
 
-# Output queues
 qRgb   = rgbOut.createOutputQueue(maxSize=4, blocking=False)
 qDet   = nn.out.createOutputQueue(maxSize=4, blocking=False)
 qDepth = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
@@ -185,57 +182,41 @@ try:
                 break
             continue
 
-        # Print layer info once
         if not printed_layers:
             print("NN output layers:", inDet.getAllLayerNames())
-            print("NNData methods:", [m for m in dir(inDet) if not m.startswith('_')])
             printed_layers = True
 
         frame      = inRgb.getCvFrame()
-        depthFrame = inDepth.getFrame()
+        depthFrame = inDepth.getFrame()   # uint16, values in mm
         h, w       = frame.shape[:2]
 
-        # Resize depth to match RGB if needed
-        if depthFrame.shape[0] != h or depthFrame.shape[1] != w:
+        if depthFrame.shape[:2] != (h, w):
             depthFrame = cv2.resize(depthFrame, (w, h), interpolation=cv2.INTER_NEAREST)
 
         # FPS
         frames += 1
         elapsed = time.monotonic() - start
-        if elapsed > 1.0:
+        if elapsed >= 1.0:
             fps    = frames / elapsed
             frames = 0
             start  = time.monotonic()
 
-        # Parse YOLO output tensor
+        # Parse detections
         layer_names = inDet.getAllLayerNames()
         tensor_name = "output0" if "output0" in layer_names else (layer_names[0] if layer_names else None)
         detections  = []
         if tensor_name:
             try:
                 tensor = np.array(inDet.getTensor(tensor_name), dtype=np.float32)
-                # Remove batch dimension if present: (1, 7, 8400) → (7, 8400)
                 if tensor.ndim == 3:
                     tensor = tensor[0]
-                # Debug on first 3 frames
-                if frames <= 3:
-                    t2 = tensor if tensor.shape[0] == 4 + NUM_CLASSES else tensor.T
-                    scores = t2[4:4 + NUM_CLASSES]
-                    print(f"[DBG] shape={tensor.shape} max_conf={float(scores.max()):.4f}", flush=True)
                 detections = parse_yolov8(tensor, CONFIDENCE_THRESH, IOU_THRESH, w, h)
             except Exception as e:
                 print(f"[WARN] tensor parse error: {e}", flush=True)
 
         print(f"Detections: {len(detections)}", flush=True)
 
-        # Colour-map depth for display
-        d_down  = depthFrame[::4]
-        nonzero = d_down[d_down != 0]
-        d_min   = float(np.percentile(nonzero, 1)) if nonzero.size else 0
-        d_max   = float(np.percentile(d_down, 99)) if d_down.size else 1
-        depthVis = np.interp(depthFrame, (d_min, d_max), (0, 255)).astype(np.uint8)
-        depthVis = cv2.applyColorMap(depthVis, cv2.COLORMAP_HOT)
-
+        # Draw + depth sampling
         for (bx1, by1, bx2, by2, conf, label_idx) in detections:
             x1 = max(0, min(int(bx1), w - 1))
             y1 = max(0, min(int(by1), h - 1))
@@ -245,7 +226,7 @@ try:
             label = LABEL_MAP[label_idx] if label_idx < len(LABEL_MAP) else str(label_idx)
             color = LABEL_COLORS.get(label, WHITE)
 
-            # Sample depth at bbox centre (5 px radius)
+            # Sample depth at bbox centre (5 px radius patch)
             cx_px = (x1 + x2) // 2
             cy_px = (y1 + y2) // 2
             r     = 5
@@ -256,11 +237,12 @@ try:
             valid = patch[(patch >= DEPTH_MIN_MM) & (patch <= DEPTH_MAX_MM)]
             z_mm  = int(np.median(valid)) if valid.size else 0
 
+            print(f"  {label} {int(conf*100)}%  x1={bx1:.1f} y1={by1:.1f} x2={bx2:.1f} y2={by2:.1f}  Z={z_mm}mm ({z_mm/1000:.2f}m)", flush=True)
+
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.rectangle(depthVis, (x1, y1), (x2, y2), WHITE, 1)
             for i, text in enumerate([
                 f"{label}  {int(conf * 100)}%",
-                f"Z: {z_mm} mm  ({z_mm/1000:.2f} m)",
+                f"Z: {z_mm}mm  ({z_mm/1000:.2f}m)" if z_mm else "Z: --",
             ]):
                 cv2.putText(frame, text, (x1 + 6, y1 + 18 + i * 16),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1)
@@ -269,9 +251,9 @@ try:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, WHITE, 1)
 
         cv2.imshow("Door Detection", frame)
-        cv2.imshow("Depth", depthVis)
 
         if cv2.waitKey(1) == ord("q"):
             break
 finally:
     pipeline.stop()
+    cv2.destroyAllWindows()
