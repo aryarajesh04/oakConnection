@@ -193,6 +193,7 @@ try:
         inDepth = qDepth.tryGet()
 
         if inRgb is None or inDet is None or inDepth is None:
+            print(f"[WAIT] rgb={inRgb is not None}  det={inDet is not None}  depth={inDepth is not None}", flush=True)
             if cv2.waitKey(1) == ord("q"):
                 break
             continue
