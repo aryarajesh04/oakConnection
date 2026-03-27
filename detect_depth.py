@@ -184,7 +184,7 @@ fps            = 0.0
 WHITE          = (255, 255, 255)
 printed_layers = False
 
-print("Running — press 'q' to quit.")
+print("Running, press 'q' to quit.")
 
 try:
     while pipeline.isRunning():
