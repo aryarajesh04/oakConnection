@@ -31,6 +31,10 @@ CONFIDENCE_THRESH = 0.50
 IOU_THRESH        = 0.45
 NUM_CLASSES       = 3
 IMGSZ             = 640
+DISPLAY_W         = 1280
+DISPLAY_H         = 720
+CROP_X            = (DISPLAY_W - IMGSZ) // 2   # 320 px left/right border
+CROP_Y            = (DISPLAY_H - IMGSZ) // 2   # 40  px top/bottom border
 DEPTH_MIN_MM      = 100
 DEPTH_MAX_MM      = 8000
 WHEELCHAIR_WIDTH_MM = 630   # physical width of wheelchair in mm
@@ -198,7 +202,19 @@ pipeline = dai.Pipeline()
 
 # RGB camera
 camRgb = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-rgbOut = camRgb.requestOutput((IMGSZ, IMGSZ), dai.ImgFrame.Type.BGR888p)
+rgbOut = camRgb.requestOutput((DISPLAY_W, DISPLAY_H), dai.ImgFrame.Type.BGR888p)
+
+# ImageManip: crop centre 640×640 region → feed to NN
+manip = pipeline.create(dai.node.ImageManip)
+manip.initialConfig.setCropRect(
+    CROP_X / DISPLAY_W,
+    CROP_Y / DISPLAY_H,
+    (CROP_X + IMGSZ) / DISPLAY_W,
+    (CROP_Y + IMGSZ) / DISPLAY_H,
+)
+manip.initialConfig.setResize(IMGSZ, IMGSZ)
+manip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
+rgbOut.link(manip.inputImage)
 
 # Mono cameras for stereo depth
 monoLeft  = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
@@ -220,7 +236,7 @@ nn = pipeline.create(dai.node.NeuralNetwork)
 nn.setBlobPath(BLOB_PATH)
 nn.setNumInferenceThreads(2)
 nn.input.setBlocking(False)
-rgbOut.link(nn.input)
+manip.out.link(nn.input)
 
 qRgb   = rgbOut.createOutputQueue(maxSize=4, blocking=False)
 qDet   = nn.out.createOutputQueue(maxSize=4, blocking=False)
@@ -293,7 +309,7 @@ try:
                 tensor = np.array(inDet.getTensor(tensor_name), dtype=np.float32)
                 if tensor.ndim == 3:
                     tensor = tensor[0]
-                detections = parse_yolov8(tensor, CONFIDENCE_THRESH, IOU_THRESH, w, h)
+                detections = parse_yolov8(tensor, CONFIDENCE_THRESH, IOU_THRESH, IMGSZ, IMGSZ)
             except Exception as e:
                 print(f"[WARN] tensor parse error: {e}", flush=True)
 
@@ -310,25 +326,35 @@ try:
             return int(np.median(valid)) if valid.size else 0
 
         # ------------------------------------------------------------------
-        # Pass 1 — collect per-detection data and draw bounding boxes for all
+        # Pass 1 — collect per-detection data; keep only highest-confidence
         # ------------------------------------------------------------------
         det_data = []
 
+        # Filter to only the single highest-confidence detection
+        if detections:
+            detections = [max(detections, key=lambda d: d[4])]
+
         for (bx1, by1, bx2, by2, conf, label_idx) in detections:
-            x1 = max(0, min(int(bx1), w - 1))
-            y1 = max(0, min(int(by1), h - 1))
-            x2 = max(0, min(int(bx2), w - 1))
-            y2 = max(0, min(int(by2), h - 1))
+            # Clamp to 640×640 depth frame space for depth sampling
+            dx1 = max(0, min(int(bx1), IMGSZ - 1))
+            dy1 = max(0, min(int(by1), IMGSZ - 1))
+            dx2 = max(0, min(int(bx2), IMGSZ - 1))
+            dy2 = max(0, min(int(by2), IMGSZ - 1))
+            # Shift into full display frame space for drawing
+            x1 = dx1 + CROP_X
+            y1 = dy1 + CROP_Y
+            x2 = dx2 + CROP_X
+            y2 = dy2 + CROP_Y
 
             label = LABEL_MAP[label_idx] if label_idx < len(LABEL_MAP) else str(label_idx)
             color = LABEL_COLORS.get(label, WHITE)
 
-            cy_px = (y1 + y2) // 2
-            cx_px = (x1 + x2) // 2
+            cy_px = (dy1 + dy2) // 2
+            cx_px = (dx1 + dx2) // 2
 
             z_centre = sample_depth(cx_px, cy_px)
-            z_left   = sample_depth(x1,    cy_px)
-            z_right  = sample_depth(x2,    cy_px)
+            z_left   = sample_depth(dx1,   cy_px)
+            z_right  = sample_depth(dx2,   cy_px)
 
             # True 3D width
             if z_left and z_right:
@@ -377,8 +403,7 @@ try:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1)
 
         # ------------------------------------------------------------------
-        # Pass 2 — draw nav path for nearest open/semi door only;
-        #          draw X/BLOCKED for every closed door
+        # Pass 2 — draw nav path for the single displayed detection
         # ------------------------------------------------------------------
         best       = None
         best_score = float("inf")
@@ -403,6 +428,10 @@ try:
                               d["x1"], d["y1"], d["x2"], d["y2"],
                               d["label"], d["color"],
                               focal_px, d["z_centre"], d["angle_deg"])
+
+        # Draw crop zone boundary (shows what the NN actually sees)
+        cv2.rectangle(frame, (CROP_X, CROP_Y), (CROP_X + IMGSZ, CROP_Y + IMGSZ),
+                      (80, 80, 80), 1)
 
         cv2.putText(frame, f"FPS: {fps:.1f}", (4, h - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, WHITE, 1)
