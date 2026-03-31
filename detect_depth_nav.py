@@ -658,9 +658,13 @@ try:
             return int(np.median(valid)) if valid.size else 0
 
         # ------------------------------------------------------------------
-        # Pass 1 — collect per-detection data and draw brackets for all doors
+        # Pass 1 — collect per-detection data; only draw the highest-confidence door
         # ------------------------------------------------------------------
         det_data = []
+
+        # Keep only the single highest-confidence detection
+        if detections:
+            detections = [max(detections, key=lambda d: d[4])]
 
         for (bx1, by1, bx2, by2, conf, label_idx) in detections:
             x1 = max(0, min(int(bx1), w - 1))
@@ -707,15 +711,9 @@ try:
                   f"Z_left={z_left}mm  Z_centre={z_centre}mm  Z_right={z_right}mm  "
                   f"W={width_mm}mm ({width_mm/1000:.2f}m)  angle={angle_str}", flush=True)
 
-            L = 20  # corner bracket length in pixels
-            cv2.line(frame, (x1, y1), (x1 + L, y1), color, 2)
-            cv2.line(frame, (x1, y1), (x1, y1 + L), color, 2)
-            cv2.line(frame, (x2, y1), (x2 - L, y1), color, 2)
-            cv2.line(frame, (x2, y1), (x2, y1 + L), color, 2)
-            cv2.line(frame, (x1, y2), (x1 + L, y2), color, 2)
-            cv2.line(frame, (x1, y2), (x1, y2 - L), color, 2)
-            cv2.line(frame, (x2, y2), (x2 - L, y2), color, 2)
-            cv2.line(frame, (x2, y2), (x2, y2 - L), color, 2)
+            # Solid bounding box: white outline + coloured inner border
+            cv2.rectangle(frame, (x1, y1), (x2, y2), WHITE, 5)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
 
         # ------------------------------------------------------------------
         # Pass 2 — draw nav path for the primary open/semi door only;
