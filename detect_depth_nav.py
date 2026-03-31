@@ -323,7 +323,7 @@ try:
             detections = [max(detections, key=lambda d: d[4])]  
 
         for (bx1, by1, bx2, by2, conf, label_idx) in detections:
-                x1 = max(0, min(int(bx1), w - 1))
+            x1 = max(0, min(int(bx1), w - 1))
             y1 = max(0, min(int(by1), h - 1))
             x2 = max(0, min(int(bx2), w - 1))
             y2 = max(0, min(int(by2), h - 1))
