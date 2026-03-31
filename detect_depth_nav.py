@@ -61,7 +61,7 @@ INFO_COLOR        = (255, 220, 0)
 close_button_rect = (0, 0, 0, 0)
 exit_requested    = False
 
-EMA_ALPHA  = 0.15   # smoothing factor (0=frozen, 1=no smoothing); ~6-frame window at 15 fps
+EMA_ALPHA  = 0.05   # smoothing factor (0=frozen, 1=no smoothing); ~20-frame window at 15 fps
 _ema_width = None   # smoothed width_mm for display
 _ema_depth = None   # smoothed z_centre for display
 
@@ -192,34 +192,15 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angl
     aligned = abs(door_cx - w // 2) <= ALIGN_TOLERANCE_PX
     cx = w // 2
 
-    PATH_BLUE  = (200, 120, 20)   # BGR — medium blue fill
-    PATH_RED   = (0,   0,   220)  # BGR — red border lines
-    PATH_ORANGE = (0,  140, 255)  # BGR — orange ideal-path guides
+    PATH_ORANGE = (0, 140, 255)  # BGR — orange ideal-path guides
+    arrow_color = LABEL_COLORS["open"] if aligned else PATH_ORANGE
 
-    # ── 1. Straight path: semi-transparent blue filled trapezoid ──────────────
-    # Represents where the user is currently heading (straight ahead).
-    bw = max(52, int(w * 0.165))   # half-width at the bottom of the frame
-    tw = max(10, int(bw * 0.22))   # half-width at the top (perspective taper)
-    ty = int(h * 0.65)             # y-coordinate of the trapezoid top
-
-    trap_pts = np.array([
-        [cx - bw, h ],
-        [cx + bw, h ],
-        [cx + tw, ty],
-        [cx - tw, ty],
-    ], dtype=np.int32)
-
-    overlay = frame.copy()
-    cv2.fillPoly(overlay, [trap_pts], PATH_BLUE)
-    cv2.addWeighted(overlay, 0.38, frame, 0.62, 0, frame)
-
-    # Red side borders of the straight path
-    cv2.line(frame, (cx - bw, h), (cx - tw, ty), PATH_RED, 3)
-    cv2.line(frame, (cx + bw, h), (cx + tw, ty), PATH_RED, 3)
+    # ── 1. Small upward arrow showing current heading ─────────────────────────
+    cv2.arrowedLine(frame, (cx, h - 20), (cx, h - 70), arrow_color, 2, tipLength=0.3)
 
     # ── 2. Ideal curved path: orange bezier guides toward the door ────────────
     # Show the user the corridor they need to steer into to reach the door.
-    outer_bw = int(bw * 1.75)          # wider starting point for the outer guides
+    outer_bw = max(90, int(w * 0.29))  # starting x-offset at bottom for the outer guides
     curve_mid_y = h - int((h - y2) * 0.38)
 
     # Left orange guide: bottom-left → left edge of door
@@ -745,7 +726,7 @@ try:
             # Smooth width and depth for display only; raw values kept for path logic
             _ema_width = ema_update(_ema_width, width_mm)
             _ema_depth = ema_update(_ema_depth, z_centre)
-            display_width_mm = int(_ema_width) if _ema_width is not None else width_mm
+            display_width_mm = int((_ema_width if _ema_width is not None else width_mm) * 0.8)
             display_z_centre = int(_ema_depth) if _ema_depth is not None else z_centre
 
             det_data.append(dict(
