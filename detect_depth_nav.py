@@ -198,7 +198,8 @@ pipeline = dai.Pipeline()
 
 # RGB camera
 camRgb = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-rgbOut = camRgb.requestOutput((IMGSZ, IMGSZ), dai.ImgFrame.Type.BGR888p)
+rgbOut   = camRgb.requestOutput((1280, 720),   dai.ImgFrame.Type.BGR888p)  # display
+rgbNnOut = camRgb.requestOutput((IMGSZ, IMGSZ), dai.ImgFrame.Type.BGR888p)  # NN input
 
 # Mono cameras for stereo depth
 monoLeft  = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
@@ -211,7 +212,7 @@ stereo = pipeline.create(dai.node.StereoDepth)
 stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
 stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
 stereo.setSubpixel(False)
-stereo.setOutputSize(IMGSZ, IMGSZ)
+stereo.setOutputSize(1280, 720)
 leftOut.link(stereo.left)
 rightOut.link(stereo.right)
 
@@ -220,7 +221,7 @@ nn = pipeline.create(dai.node.NeuralNetwork)
 nn.setBlobPath(BLOB_PATH)
 nn.setNumInferenceThreads(2)
 nn.input.setBlocking(False)
-rgbOut.link(nn.input)
+rgbNnOut.link(nn.input)
 
 qRgb   = rgbOut.createOutputQueue(maxSize=4, blocking=False)
 qDet   = nn.out.createOutputQueue(maxSize=4, blocking=False)
@@ -235,14 +236,14 @@ pipeline.start()
 try:
     device     = pipeline.getDefaultDevice()
     calib      = device.readCalibration()
-    intrinsics = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, IMGSZ, IMGSZ)
+    intrinsics = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, 1280, 720)
     focal_px   = intrinsics[0][0]   # fx
     cam_cx     = intrinsics[0][2]   # principal point x
     print(f"Calibration: fx={focal_px:.1f} px  cx={cam_cx:.1f} px")
 except Exception:
     HFOV_DEG = 73.0  # OAK-D Lite colour camera horizontal FOV fallback
-    focal_px = (IMGSZ / 2) / math.tan(math.radians(HFOV_DEG / 2))
-    cam_cx   = IMGSZ / 2
+    focal_px = (1280 / 2) / math.tan(math.radians(HFOV_DEG / 2))
+    cam_cx   = 1280 / 2
     print(f"Focal length from FOV fallback ({HFOV_DEG}°): fx={focal_px:.1f} px  cx={cam_cx:.1f} px")
 
 start          = time.monotonic()
@@ -310,9 +311,13 @@ try:
             return int(np.median(valid)) if valid.size else 0
 
         # ------------------------------------------------------------------
-        # Pass 1 — collect per-detection data and draw bounding boxes for all
+        # Pass 1 — collect per-detection data; keep only highest-confidence   
         # ------------------------------------------------------------------
         det_data = []
+
+        # Filter to only the single highest-confidence detection                                                
+        if detections:                                                                                          
+            detections = [max(detections, key=lambda d: d[4])]  
 
         for (bx1, by1, bx2, by2, conf, label_idx) in detections:
             x1 = max(0, min(int(bx1), w - 1))
