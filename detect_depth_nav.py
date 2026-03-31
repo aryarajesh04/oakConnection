@@ -61,6 +61,10 @@ INFO_COLOR        = (255, 220, 0)
 close_button_rect = (0, 0, 0, 0)
 exit_requested    = False
 
+EMA_ALPHA  = 0.15   # smoothing factor (0=frozen, 1=no smoothing); ~6-frame window at 15 fps
+_ema_width = None   # smoothed width_mm for display
+_ema_depth = None   # smoothed z_centre for display
+
 if not BLOB_PATH:
     print("Usage: python detect_depth_nav.py <path/to/best.blob>")
     sys.exit(1)
@@ -196,7 +200,7 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angl
     # Represents where the user is currently heading (straight ahead).
     bw = max(52, int(w * 0.165))   # half-width at the bottom of the frame
     tw = max(10, int(bw * 0.22))   # half-width at the top (perspective taper)
-    ty = int(h * 0.15)             # y-coordinate of the trapezoid top
+    ty = int(h * 0.65)             # y-coordinate of the trapezoid top
 
     trap_pts = np.array([
         [cx - bw, h ],
@@ -299,6 +303,15 @@ def draw_status_card(canvas, x, y, w, h, card):
     subtitle_scale = fit_text_scale(card["subtitle"], w - 56, 0.72, 2)
     cv2.putText(canvas, card["subtitle"], (x + 30, y + h - 28),
                 cv2.FONT_HERSHEY_SIMPLEX, subtitle_scale, UI_MUTED, 2)
+
+
+def ema_update(prev, new_val, alpha=EMA_ALPHA):
+    """EMA step. Holds last good value when new_val is 0 (bad depth read)."""
+    if new_val <= 0:
+        return prev
+    if prev is None:
+        return float(new_val)
+    return alpha * new_val + (1.0 - alpha) * prev
 
 
 def drain_latest(queue):
@@ -447,10 +460,11 @@ def build_status_summary(target, frame_width):
             "color": TURN_COLOR,
         }
 
-    if z_centre > 0:
+    display_z = target.get("display_z_centre", z_centre)
+    if display_z > 0:
         distance_card = {
             "title": "Distance",
-            "value": f"{z_centre / 1000:.2f} m",
+            "value": f"{display_z / 1000:.2f} m",
             "subtitle": "Door centre depth",
             "color": INFO_COLOR,
         }
@@ -691,6 +705,9 @@ try:
         # Keep only the single highest-confidence detection
         if detections:
             detections = [max(detections, key=lambda d: d[4])]
+        else:
+            _ema_width = None
+            _ema_depth = None
 
         for (bx1, by1, bx2, by2, conf, label_idx) in detections:
             x1 = max(0, min(int(bx1), w - 1))
@@ -725,11 +742,19 @@ try:
             else:
                 angle_deg = None
 
+            # Smooth width and depth for display only; raw values kept for path logic
+            _ema_width = ema_update(_ema_width, width_mm)
+            _ema_depth = ema_update(_ema_depth, z_centre)
+            display_width_mm = int(_ema_width) if _ema_width is not None else width_mm
+            display_z_centre = int(_ema_depth) if _ema_depth is not None else z_centre
+
             det_data.append(dict(
                 x1=x1, y1=y1, x2=x2, y2=y2, conf=conf,
                 label=label, color=color,
-                z_centre=z_centre, z_left=z_left, z_right=z_right,
-                width_mm=width_mm, angle_deg=angle_deg,
+                z_centre=z_centre, z_left=z_left, z_right=z_right,  # raw — path logic
+                width_mm=display_width_mm,          # smoothed — clearance card
+                display_z_centre=display_z_centre,  # smoothed — distance card
+                angle_deg=angle_deg,
             ))
 
             angle_str = f"{angle_deg:+.1f}°" if angle_deg is not None else "--"
