@@ -555,7 +555,7 @@ try:
     cam_cx     = intrinsics[0][2]   # principal point x
     print(f"Calibration: fx={focal_px:.1f} px  cx={cam_cx:.1f} px")
 except Exception:
-    HFOV_DEG = 73.0  # OAK-D Lite colour camera horizontal FOV fallback
+    HFOV_DEG = 81.0  # horizontal FOV fallback when calibration is unavailable
     focal_px = (IMGSZ / 2) / math.tan(math.radians(HFOV_DEG / 2))
     cam_cx   = IMGSZ / 2
     print(f"Focal length from FOV fallback ({HFOV_DEG}°): fx={focal_px:.1f} px  cx={cam_cx:.1f} px")
