@@ -34,6 +34,26 @@ IMGSZ             = 640
 DEPTH_MIN_MM      = 100
 DEPTH_MAX_MM      = 8000
 WHEELCHAIR_WIDTH_MM = 630   # physical width of wheelchair in mm
+SCREEN_W          = 720
+SCREEN_H          = 1280
+CAM_W             = 640
+CAM_H             = 640
+CAM_X             = 40
+CAM_Y             = 0
+WIDTH_BUFFER_MM   = 50
+PASS_WIDTH_MM     = WHEELCHAIR_WIDTH_MM + WIDTH_BUFFER_MM
+ALIGN_TOLERANCE_PX = 50
+WINDOW_NAME       = "Door Detection + Nav"
+
+WHITE             = (255, 255, 255)
+UI_BG             = (18, 24, 34)
+UI_PANEL          = (28, 36, 48)
+UI_PANEL_DARK     = (20, 26, 36)
+UI_BORDER         = (68, 80, 96)
+UI_MUTED          = (158, 170, 184)
+UI_NEUTRAL        = (110, 120, 132)
+TURN_COLOR        = (0, 140, 255)
+INFO_COLOR        = (255, 220, 0)
 
 if not BLOB_PATH:
     print("Usage: python detect_depth_nav.py <path/to/best.blob>")
@@ -161,8 +181,8 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, angle
         return
 
     # Alignment → path colour
-    aligned    = abs(door_cx - w // 2) <= 50
-    path_color = (0, 220, 0) if aligned else (0, 140, 255)
+    aligned    = abs(door_cx - w // 2) <= ALIGN_TOLERANCE_PX
+    path_color = LABEL_COLORS["open"] if aligned else TURN_COLOR
 
     # Bezier control points
     path_height  = max(h - y2, 1)
@@ -189,6 +209,287 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, angle
         (tw, _), _ = cv2.getTextSize(turn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
         cv2.putText(frame, turn_text, (mid_pt[0] - tw // 2, mid_pt[1]),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, path_color, 2)
+
+
+def detection_score(det):
+    """Return a lower-is-better score for choosing the most relevant doorway."""
+    if det["z_centre"] > 0:
+        return float(det["z_centre"])
+    area = max((det["x2"] - det["x1"]) * (det["y2"] - det["y1"]), 1)
+    return 1.0 / area
+
+
+def select_primary_target(det_data):
+    """Prefer the nearest open/semi door, then fall back to the nearest closed door."""
+    best_open = None
+    best_open_score = float("inf")
+    best_closed = None
+    best_closed_score = float("inf")
+
+    for det in det_data:
+        score = detection_score(det)
+        if det["label"] in ("open", "semi") and score < best_open_score:
+            best_open = det
+            best_open_score = score
+        elif det["label"] == "closed" and score < best_closed_score:
+            best_closed = det
+            best_closed_score = score
+
+    return best_open if best_open is not None else best_closed
+
+
+def fit_text_scale(text, max_width, base_scale, thickness):
+    """Shrink text until it fits inside max_width."""
+    scale = base_scale
+    while scale > 0.45:
+        (text_w, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        if text_w <= max_width:
+            return scale
+        scale -= 0.05
+    return 0.45
+
+
+def draw_status_card(canvas, x, y, w, h, card):
+    """Render a dashboard card with a colored accent rail."""
+    color = card["color"]
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), UI_PANEL, -1)
+    cv2.rectangle(canvas, (x, y), (x + 14, y + h), color, -1)
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), UI_BORDER, 2)
+
+    cv2.putText(canvas, card["title"].upper(), (x + 30, y + 42),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, UI_MUTED, 2)
+
+    value_scale = fit_text_scale(card["value"], w - 56, 1.45, 3)
+    value_y = y + 116
+    cv2.putText(canvas, card["value"], (x + 30, value_y),
+                cv2.FONT_HERSHEY_SIMPLEX, value_scale, WHITE, 3)
+
+    subtitle_scale = fit_text_scale(card["subtitle"], w - 56, 0.72, 2)
+    cv2.putText(canvas, card["subtitle"], (x + 30, y + h - 28),
+                cv2.FONT_HERSHEY_SIMPLEX, subtitle_scale, UI_MUTED, 2)
+
+
+def draw_overlay_pills(frame, summary):
+    """Render compact status pills inside the live camera view."""
+    overlay = frame.copy()
+    pills = summary["overlay_pills"]
+    margin_x = 14
+    margin_y = 14
+    gap = 10
+    pill_h = 56
+    pill_w = (frame.shape[1] - 2 * margin_x - gap * (len(pills) - 1)) // len(pills)
+
+    for i, pill in enumerate(pills):
+        x1 = margin_x + i * (pill_w + gap)
+        y1 = margin_y
+        x2 = x1 + pill_w
+        y2 = y1 + pill_h
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), UI_PANEL_DARK, -1)
+
+    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+
+    for i, pill in enumerate(pills):
+        x1 = margin_x + i * (pill_w + gap)
+        y1 = margin_y
+        x2 = x1 + pill_w
+        y2 = y1 + pill_h
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), pill["color"], 2)
+        cv2.putText(frame, pill["title"].upper(), (x1 + 12, y1 + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, UI_MUTED, 1)
+        value_scale = fit_text_scale(pill["value"], pill_w - 24, 0.72, 2)
+        cv2.putText(frame, pill["value"], (x1 + 12, y1 + 42),
+                    cv2.FONT_HERSHEY_SIMPLEX, value_scale, WHITE, 2)
+
+
+def build_status_summary(target, frame_width):
+    """Translate one doorway target into dashboard cards and overlay pills."""
+    if target is None:
+        cards = {
+            "door": {
+                "title": "Door",
+                "value": "NO DOOR",
+                "subtitle": "No doorway detected yet",
+                "color": UI_NEUTRAL,
+            },
+            "clearance": {
+                "title": "Clearance",
+                "value": "UNKNOWN",
+                "subtitle": f"Need at least {PASS_WIDTH_MM} mm",
+                "color": UI_NEUTRAL,
+            },
+            "guidance": {
+                "title": "Guidance",
+                "value": "STOP",
+                "subtitle": "No target door in view",
+                "color": LABEL_COLORS["closed"],
+            },
+            "distance": {
+                "title": "Distance",
+                "value": "NO DEPTH",
+                "subtitle": "Waiting for a valid depth sample",
+                "color": UI_NEUTRAL,
+            },
+        }
+        return {
+            "target": None,
+            "cards": cards,
+            "overlay_pills": [cards["door"], cards["clearance"], cards["guidance"]],
+            "message": "No passable door detected",
+            "message_color": TURN_COLOR,
+        }
+
+    label = target["label"]
+    width_mm = target["width_mm"]
+    z_centre = target["z_centre"]
+    door_center_x = (target["x1"] + target["x2"]) // 2
+    offset_px = door_center_x - frame_width // 2
+
+    if label == "semi":
+        door_value = "SEMI"
+    else:
+        door_value = label.upper()
+
+    door_card = {
+        "title": "Door",
+        "value": door_value,
+        "subtitle": f"{int(target['conf'] * 100)}% confidence",
+        "color": LABEL_COLORS.get(label, UI_NEUTRAL),
+    }
+
+    if label == "closed":
+        clearance_card = {
+            "title": "Clearance",
+            "value": "BLOCKED",
+            "subtitle": "Door is closed",
+            "color": LABEL_COLORS["closed"],
+        }
+    elif width_mm <= 0:
+        clearance_card = {
+            "title": "Clearance",
+            "value": "UNKNOWN",
+            "subtitle": f"Need at least {PASS_WIDTH_MM} mm",
+            "color": UI_NEUTRAL,
+        }
+    elif width_mm >= PASS_WIDTH_MM:
+        clearance_card = {
+            "title": "Clearance",
+            "value": "PASS",
+            "subtitle": f"{width_mm} mm clear opening",
+            "color": LABEL_COLORS["open"],
+        }
+    else:
+        clearance_card = {
+            "title": "Clearance",
+            "value": "TOO NARROW",
+            "subtitle": f"{width_mm} mm clear, need {PASS_WIDTH_MM} mm",
+            "color": TURN_COLOR,
+        }
+
+    if label == "closed":
+        guidance_card = {
+            "title": "Guidance",
+            "value": "STOP",
+            "subtitle": "Blocked doorway",
+            "color": LABEL_COLORS["closed"],
+        }
+    elif abs(offset_px) <= ALIGN_TOLERANCE_PX:
+        guidance_card = {
+            "title": "Guidance",
+            "value": "CENTERED",
+            "subtitle": f"Aligned within {ALIGN_TOLERANCE_PX} px",
+            "color": LABEL_COLORS["open"],
+        }
+    else:
+        guidance_card = {
+            "title": "Guidance",
+            "value": "TURN RIGHT" if offset_px > 0 else "TURN LEFT",
+            "subtitle": f"{abs(offset_px)} px off centre",
+            "color": TURN_COLOR,
+        }
+
+    if z_centre > 0:
+        distance_card = {
+            "title": "Distance",
+            "value": f"{z_centre / 1000:.2f} m",
+            "subtitle": "Door centre depth",
+            "color": INFO_COLOR,
+        }
+    else:
+        distance_card = {
+            "title": "Distance",
+            "value": "NO DEPTH",
+            "subtitle": "Waiting for a valid depth sample",
+            "color": UI_NEUTRAL,
+        }
+
+    if label == "closed":
+        message = "No passable door detected"
+        message_color = LABEL_COLORS["closed"]
+    elif clearance_card["value"] == "PASS":
+        message = "Passable door detected"
+        message_color = LABEL_COLORS["open"]
+    elif clearance_card["value"] == "TOO NARROW":
+        message = "Opening is too narrow for the wheelchair"
+        message_color = TURN_COLOR
+    else:
+        message = "Door found, but width is unknown"
+        message_color = UI_MUTED
+
+    cards = {
+        "door": door_card,
+        "clearance": clearance_card,
+        "guidance": guidance_card,
+        "distance": distance_card,
+    }
+
+    return {
+        "target": target,
+        "cards": cards,
+        "overlay_pills": [door_card, clearance_card, guidance_card],
+        "message": message,
+        "message_color": message_color,
+    }
+
+
+def render_portrait_display(camera_frame, summary, fps):
+    """Place the 640x640 camera view into a 720x1280 portrait dashboard layout."""
+    if camera_frame.shape[1] != CAM_W or camera_frame.shape[0] != CAM_H:
+        camera_frame = cv2.resize(camera_frame, (CAM_W, CAM_H), interpolation=cv2.INTER_LINEAR)
+
+    canvas = np.full((SCREEN_H, SCREEN_W, 3), UI_BG, dtype=np.uint8)
+
+    cv2.rectangle(canvas, (0, 0), (SCREEN_W, CAM_H + 36), UI_PANEL_DARK, -1)
+    canvas[CAM_Y:CAM_Y + CAM_H, CAM_X:CAM_X + CAM_W] = camera_frame
+    cv2.rectangle(canvas, (CAM_X - 3, CAM_Y), (CAM_X + CAM_W + 3, CAM_Y + CAM_H + 6), UI_BORDER, 2)
+
+    dash_top = CAM_Y + CAM_H + 38
+    dash_left = 28
+    gap = 20
+    card_w = (SCREEN_W - 2 * dash_left - gap) // 2
+    card_h = 220
+    row1_y = dash_top
+    row2_y = row1_y + card_h + gap
+
+    cv2.putText(canvas, "DOORWAY STATUS", (dash_left, dash_top - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, UI_MUTED, 2)
+
+    draw_status_card(canvas, dash_left, row1_y, card_w, card_h, summary["cards"]["door"])
+    draw_status_card(canvas, dash_left + card_w + gap, row1_y, card_w, card_h, summary["cards"]["clearance"])
+    draw_status_card(canvas, dash_left, row2_y, card_w, card_h, summary["cards"]["guidance"])
+    draw_status_card(canvas, dash_left + card_w + gap, row2_y, card_w, card_h, summary["cards"]["distance"])
+
+    footer_y = row2_y + card_h + 56
+    cv2.line(canvas, (dash_left, footer_y - 26), (SCREEN_W - dash_left, footer_y - 26), UI_BORDER, 1)
+    message_scale = fit_text_scale(summary["message"], SCREEN_W - 220, 0.8, 2)
+    cv2.putText(canvas, summary["message"], (dash_left, footer_y),
+                cv2.FONT_HERSHEY_SIMPLEX, message_scale, summary["message_color"], 2)
+    cv2.putText(canvas, f"FPS {fps:.1f}", (SCREEN_W - 150, footer_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, WHITE, 2)
+    cv2.putText(canvas, f"Chair {WHEELCHAIR_WIDTH_MM} mm + {WIDTH_BUFFER_MM} mm buffer",
+                (dash_left, footer_y + 46), cv2.FONT_HERSHEY_SIMPLEX, 0.7, UI_MUTED, 2)
+
+    return canvas
 
 
 # ---------------------------------------------------------------------------
@@ -248,10 +549,16 @@ except Exception:
 start          = time.monotonic()
 frames         = 0
 fps            = 0.0
-WHITE          = (255, 255, 255)
 printed_layers = False
 
 print("Running, press 'q' to quit.")
+
+cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+cv2.resizeWindow(WINDOW_NAME, SCREEN_W, SCREEN_H)
+try:
+    cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+except (cv2.error, AttributeError):
+    pass
 
 try:
     while pipeline.isRunning():
@@ -261,6 +568,27 @@ try:
 
         if inRgb is None or inDet is None or inDepth is None:
             print(f"[WAIT] rgb={inRgb is not None}  det={inDet is not None}  depth={inDepth is not None}", flush=True)
+            wait_frame = np.full((CAM_H, CAM_W, 3), UI_PANEL_DARK, dtype=np.uint8)
+            wait_text = (
+                f"RGB {'OK' if inRgb is not None else '--'}   "
+                f"NN {'OK' if inDet is not None else '--'}   "
+                f"DEPTH {'OK' if inDepth is not None else '--'}"
+            )
+            title_text = "STARTING DOORWAY UI"
+            title_scale = fit_text_scale("STARTING DOORWAY UI", CAM_W - 80, 1.05, 3)
+            (title_w, _), _ = cv2.getTextSize(title_text, cv2.FONT_HERSHEY_SIMPLEX, title_scale, 3)
+            cv2.putText(wait_frame, title_text, ((CAM_W - title_w) // 2, CAM_H // 2 - 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, title_scale, WHITE, 3)
+            wait_scale = fit_text_scale(wait_text, CAM_W - 80, 0.78, 2)
+            (wait_w, _), _ = cv2.getTextSize(wait_text, cv2.FONT_HERSHEY_SIMPLEX, wait_scale, 2)
+            cv2.putText(wait_frame, wait_text, ((CAM_W - wait_w) // 2, CAM_H // 2 + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, wait_scale, UI_MUTED, 2)
+
+            summary = build_status_summary(None, CAM_W)
+            summary["message"] = "Waiting for RGB, depth, and neural network output"
+            summary["message_color"] = UI_MUTED
+            display_frame = render_portrait_display(wait_frame, summary, fps)
+            cv2.imshow(WINDOW_NAME, display_frame)
             if cv2.waitKey(1) == ord("q"):
                 break
             continue
@@ -310,7 +638,7 @@ try:
             return int(np.median(valid)) if valid.size else 0
 
         # ------------------------------------------------------------------
-        # Pass 1 — collect per-detection data and draw bounding boxes for all
+        # Pass 1 — collect per-detection data and draw brackets for all doors
         # ------------------------------------------------------------------
         det_data = []
 
@@ -368,34 +696,19 @@ try:
             cv2.line(frame, (x1, y2), (x1, y2 - L), color, 2)
             cv2.line(frame, (x2, y2), (x2 - L, y2), color, 2)
             cv2.line(frame, (x2, y2), (x2, y2 - L), color, 2)
-            for i, text in enumerate([
-                f"{label}  {int(conf * 100)}%",
-                f"Z: L={z_left}  C={z_centre}  R={z_right}mm" if z_centre else "Z: --",
-                f"W: {width_mm}mm  angle: {angle_str}" if width_mm else "W: --",
-            ]):
-                cv2.putText(frame, text, (x1 + 6, y1 + 18 + i * 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1)
 
         # ------------------------------------------------------------------
-        # Pass 2 — draw nav path for nearest open/semi door only;
+        # Pass 2 — draw nav path for the primary open/semi door only;
         #          draw X/BLOCKED for every closed door
         # ------------------------------------------------------------------
-        best       = None
-        best_score = float("inf")
-        for d in det_data:
-            if d["label"] not in ("open", "semi"):
-                continue
-            score = d["z_centre"] if d["z_centre"] > 0 else \
-                    1.0 / max((d["x2"] - d["x1"]) * (d["y2"] - d["y1"]), 1)
-            if score < best_score:
-                best_score = score
-                best = d
+        primary_target = select_primary_target(det_data)
 
-        if best is not None:
+        if primary_target is not None and primary_target["label"] in ("open", "semi"):
             draw_nav_path(frame,
-                          best["x1"], best["y1"], best["x2"], best["y2"],
-                          best["label"], best["color"],
-                          focal_px, best["z_centre"], best["angle_deg"])
+                          primary_target["x1"], primary_target["y1"],
+                          primary_target["x2"], primary_target["y2"],
+                          primary_target["label"], primary_target["color"],
+                          focal_px, primary_target["z_centre"], primary_target["angle_deg"])
 
         for d in det_data:
             if d["label"] == "closed":
@@ -404,10 +717,11 @@ try:
                               d["label"], d["color"],
                               focal_px, d["z_centre"], d["angle_deg"])
 
-        cv2.putText(frame, f"FPS: {fps:.1f}", (4, h - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, WHITE, 1)
+        summary = build_status_summary(primary_target, w)
+        draw_overlay_pills(frame, summary)
+        display_frame = render_portrait_display(frame, summary, fps)
 
-        cv2.imshow("Door Detection + Nav", frame)
+        cv2.imshow(WINDOW_NAME, display_frame)
 
         if cv2.waitKey(1) == ord("q"):
             break
