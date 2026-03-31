@@ -166,14 +166,13 @@ def bezier_cubic(p0, p1, p2, p3, n=60):
     return pts
 
 
-def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, angle_deg):
+def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angle_deg):
     """
-    Overlay a navigation path from the wheelchair (bottom-centre of frame) to the door.
+    Overlay a reverse-camera-style navigation path.
 
-    - open/semi → cubic Bezier path + north arrow + alignment feedback
-      - green  : door is within ±50 px of frame centre (aligned)
-      - orange : door is off-centre → "TURN LEFT" or "TURN RIGHT"
-    - closed   → red X + "BLOCKED"
+    - Straight path (blue filled trapezoid + red borders): current heading direction.
+    - Ideal path (orange bezier curves): the path to steer toward the door.
+    - closed → red X + "BLOCKED"
     """
     h, w = frame.shape[:2]
     door_cx = (x1 + x2) // 2
@@ -186,35 +185,62 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, angle
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
         return
 
-    # Alignment → path colour
-    aligned    = abs(door_cx - w // 2) <= ALIGN_TOLERANCE_PX
-    path_color = LABEL_COLORS["open"] if aligned else TURN_COLOR
+    aligned = abs(door_cx - w // 2) <= ALIGN_TOLERANCE_PX
+    cx = w // 2
 
-    # Bezier control points
-    path_height  = max(h - y2, 1)
-    angle_rad    = math.radians(angle_deg) if angle_deg is not None else 0.0
-    approach_dist = path_height * 0.4
+    PATH_BLUE  = (200, 120, 20)   # BGR — medium blue fill
+    PATH_RED   = (0,   0,   220)  # BGR — red border lines
+    PATH_ORANGE = (0,  140, 255)  # BGR — orange ideal-path guides
 
-    P0 = (w // 2, h)
-    P1 = (w // 2, h - int(path_height * 0.45))
-    P2 = (int(door_cx - math.sin(angle_rad) * approach_dist),
-          int(y2      + math.cos(angle_rad) * approach_dist))
-    P3 = (door_cx, int(y2))
+    # ── 1. Straight path: semi-transparent blue filled trapezoid ──────────────
+    # Represents where the user is currently heading (straight ahead).
+    bw = max(52, int(w * 0.165))   # half-width at the bottom of the frame
+    tw = max(10, int(bw * 0.22))   # half-width at the top (perspective taper)
+    ty = int(h * 0.15)             # y-coordinate of the trapezoid top
 
-    pts = bezier_cubic(P0, P1, P2, P3)
-    cv2.polylines(frame, [np.array(pts, dtype=np.int32)], False, path_color, 2)
+    trap_pts = np.array([
+        [cx - bw, h ],
+        [cx + bw, h ],
+        [cx + tw, ty],
+        [cx - tw, ty],
+    ], dtype=np.int32)
 
-    # North arrow — overlaid on the straight initial section, always points up
-    cv2.arrowedLine(frame, (w // 2, h - 20), (w // 2, h - 70),
-                    path_color, 2, tipLength=0.3)
+    overlay = frame.copy()
+    cv2.fillPoly(overlay, [trap_pts], PATH_BLUE)
+    cv2.addWeighted(overlay, 0.38, frame, 0.62, 0, frame)
+
+    # Red side borders of the straight path
+    cv2.line(frame, (cx - bw, h), (cx - tw, ty), PATH_RED, 3)
+    cv2.line(frame, (cx + bw, h), (cx + tw, ty), PATH_RED, 3)
+
+    # ── 2. Ideal curved path: orange bezier guides toward the door ────────────
+    # Show the user the corridor they need to steer into to reach the door.
+    outer_bw = int(bw * 1.75)          # wider starting point for the outer guides
+    curve_mid_y = h - int((h - y2) * 0.38)
+
+    # Left orange guide: bottom-left → left edge of door
+    PL0 = (cx - outer_bw, h)
+    PL1 = (cx - outer_bw, curve_mid_y)
+    PL2 = (x1, y2 + int((h - y2) * 0.35))
+    PL3 = (x1, y2)
+    pts_l = bezier_cubic(PL0, PL1, PL2, PL3)
+    cv2.polylines(frame, [np.array(pts_l, dtype=np.int32)], False, PATH_ORANGE, 3)
+
+    # Right orange guide: bottom-right → right edge of door
+    PR0 = (cx + outer_bw, h)
+    PR1 = (cx + outer_bw, curve_mid_y)
+    PR2 = (x2, y2 + int((h - y2) * 0.35))
+    PR3 = (x2, y2)
+    pts_r = bezier_cubic(PR0, PR1, PR2, PR3)
+    cv2.polylines(frame, [np.array(pts_r, dtype=np.int32)], False, PATH_ORANGE, 3)
 
     # Turn instruction when not aligned
     if not aligned:
-        turn_text = "TURN RIGHT" if door_cx > w // 2 else "TURN LEFT"
-        mid_pt    = pts[len(pts) // 2]
-        (tw, _), _ = cv2.getTextSize(turn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
-        cv2.putText(frame, turn_text, (mid_pt[0] - tw // 2, mid_pt[1]),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, path_color, 2)
+        turn_text = "TURN RIGHT" if door_cx > cx else "TURN LEFT"
+        (tw_px, _), _ = cv2.getTextSize(turn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+        mid_pt = pts_l[len(pts_l) // 2] if door_cx < cx else pts_r[len(pts_r) // 2]
+        cv2.putText(frame, turn_text, (cx - tw_px // 2, mid_pt[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, PATH_ORANGE, 2)
 
 
 def detection_score(det):
