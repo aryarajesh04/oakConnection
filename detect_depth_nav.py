@@ -206,10 +206,7 @@ rgbOut = camRgb.requestOutput((DISPLAY_W, DISPLAY_H), dai.ImgFrame.Type.BGR888p)
 
 # Crop centre 640×640 for NN — no compression, just pixel slice
 manip = pipeline.create(dai.node.ImageManip)
-manip.initialConfig.addCrop(
-    dai.Rect(CROP_X, CROP_Y, CROP_X + IMGSZ, CROP_Y + IMGSZ),
-    normalizedCoords=False,
-)
+manip.initialConfig.addCrop(CROP_X, CROP_Y, IMGSZ, IMGSZ)
 manip.initialConfig.setOutputSize(IMGSZ, IMGSZ)
 manip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
 rgbOut.link(manip.inputImage)
