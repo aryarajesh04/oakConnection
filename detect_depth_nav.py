@@ -202,14 +202,7 @@ pipeline = dai.Pipeline()
 
 # RGB camera
 camRgb = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-rgbOut = camRgb.requestOutput((DISPLAY_W, DISPLAY_H), dai.ImgFrame.Type.BGR888p)
-
-# Crop centre 640×640 for NN — no compression, just pixel slice
-manip = pipeline.create(dai.node.ImageManip)
-manip.initialConfig.addCrop(CROP_X, CROP_Y, IMGSZ, IMGSZ)
-manip.initialConfig.setOutputSize(IMGSZ, IMGSZ)
-manip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
-rgbOut.link(manip.inputImage)
+rgbOut = camRgb.requestOutput((IMGSZ, IMGSZ), dai.ImgFrame.Type.BGR888p)
 
 # Mono cameras for stereo depth
 monoLeft  = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
@@ -222,7 +215,7 @@ stereo = pipeline.create(dai.node.StereoDepth)
 stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
 stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
 stereo.setSubpixel(False)
-stereo.setOutputSize(1280, 720)
+stereo.setOutputSize(IMGSZ, IMGSZ)
 leftOut.link(stereo.left)
 rightOut.link(stereo.right)
 
@@ -231,7 +224,7 @@ nn = pipeline.create(dai.node.NeuralNetwork)
 nn.setBlobPath(BLOB_PATH)
 nn.setNumInferenceThreads(2)
 nn.input.setBlocking(False)
-manip.out.link(nn.input)
+rgbOut.link(nn.input)
 
 qRgb   = rgbOut.createOutputQueue(maxSize=4, blocking=False)
 qDet   = nn.out.createOutputQueue(maxSize=4, blocking=False)
@@ -304,7 +297,7 @@ try:
                 tensor = np.array(inDet.getTensor(tensor_name), dtype=np.float32)
                 if tensor.ndim == 3:
                     tensor = tensor[0]
-                detections = parse_yolov8(tensor, CONFIDENCE_THRESH, IOU_THRESH, IMGSZ, IMGSZ)
+                detections = parse_yolov8(tensor, CONFIDENCE_THRESH, IOU_THRESH, w, h)
             except Exception as e:
                 print(f"[WARN] tensor parse error: {e}", flush=True)
 
@@ -330,11 +323,10 @@ try:
             detections = [max(detections, key=lambda d: d[4])]  
 
         for (bx1, by1, bx2, by2, conf, label_idx) in detections:
-            # Offset from 640×640 NN space into 1280×720 display/depth space
-            x1 = max(0, min(int(bx1) + CROP_X, w - 1))
-            y1 = max(0, min(int(by1) + CROP_Y, h - 1))
-            x2 = max(0, min(int(bx2) + CROP_X, w - 1))
-            y2 = max(0, min(int(by2) + CROP_Y, h - 1))
+                x1 = max(0, min(int(bx1), w - 1))
+            y1 = max(0, min(int(by1), h - 1))
+            x2 = max(0, min(int(bx2), w - 1))
+            y2 = max(0, min(int(by2), h - 1))
 
             label = LABEL_MAP[label_idx] if label_idx < len(LABEL_MAP) else str(label_idx)
             color = LABEL_COLORS.get(label, WHITE)
@@ -423,7 +415,8 @@ try:
         cv2.putText(frame, f"FPS: {fps:.1f}", (4, h - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, WHITE, 1)
 
-        cv2.imshow("Door Detection + Nav", frame)
+        display = cv2.resize(frame, (DISPLAY_W, DISPLAY_H), interpolation=cv2.INTER_LINEAR)
+        cv2.imshow("Door Detection + Nav", display)
 
         if cv2.waitKey(1) == ord("q"):
             break
