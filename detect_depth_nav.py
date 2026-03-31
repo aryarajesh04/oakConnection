@@ -44,6 +44,9 @@ WIDTH_BUFFER_MM   = 50
 PASS_WIDTH_MM     = WHEELCHAIR_WIDTH_MM + WIDTH_BUFFER_MM
 ALIGN_TOLERANCE_PX = 50
 WINDOW_NAME       = "Door Detection + Nav"
+CLOSE_BTN_W       = 88
+CLOSE_BTN_H       = 88
+CLOSE_BTN_PAD     = 18
 
 WHITE             = (255, 255, 255)
 UI_BG             = (18, 24, 34)
@@ -54,6 +57,9 @@ UI_MUTED          = (158, 170, 184)
 UI_NEUTRAL        = (110, 120, 132)
 TURN_COLOR        = (0, 140, 255)
 INFO_COLOR        = (255, 220, 0)
+
+close_button_rect = (0, 0, 0, 0)
+exit_requested    = False
 
 if not BLOB_PATH:
     print("Usage: python detect_depth_nav.py <path/to/best.blob>")
@@ -269,37 +275,45 @@ def draw_status_card(canvas, x, y, w, h, card):
                 cv2.FONT_HERSHEY_SIMPLEX, subtitle_scale, UI_MUTED, 2)
 
 
-def draw_overlay_pills(frame, summary):
-    """Render compact status pills inside the live camera view."""
-    overlay = frame.copy()
-    pills = summary["overlay_pills"]
-    margin_x = 14
-    margin_y = 14
-    gap = 10
-    pill_h = 56
-    pill_w = (frame.shape[1] - 2 * margin_x - gap * (len(pills) - 1)) // len(pills)
+def drain_latest(queue):
+    """Read every pending packet and return only the newest one."""
+    latest = None
+    while True:
+        packet = queue.tryGet()
+        if packet is None:
+            return latest
+        latest = packet
 
-    for i, pill in enumerate(pills):
-        x1 = margin_x + i * (pill_w + gap)
-        y1 = margin_y
-        x2 = x1 + pill_w
-        y2 = y1 + pill_h
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), UI_PANEL_DARK, -1)
 
-    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+def draw_close_button(canvas):
+    """Draw a large touchscreen-friendly close button in the top-right corner."""
+    global close_button_rect
 
-    for i, pill in enumerate(pills):
-        x1 = margin_x + i * (pill_w + gap)
-        y1 = margin_y
-        x2 = x1 + pill_w
-        y2 = y1 + pill_h
+    x2 = SCREEN_W - CLOSE_BTN_PAD
+    y1 = CLOSE_BTN_PAD
+    x1 = x2 - CLOSE_BTN_W
+    y2 = y1 + CLOSE_BTN_H
+    close_button_rect = (x1, y1, x2, y2)
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), pill["color"], 2)
-        cv2.putText(frame, pill["title"].upper(), (x1 + 12, y1 + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, UI_MUTED, 1)
-        value_scale = fit_text_scale(pill["value"], pill_w - 24, 0.72, 2)
-        cv2.putText(frame, pill["value"], (x1 + 12, y1 + 42),
-                    cv2.FONT_HERSHEY_SIMPLEX, value_scale, WHITE, 2)
+    overlay = canvas.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), UI_PANEL, -1)
+    cv2.addWeighted(overlay, 0.78, canvas, 0.22, 0, canvas)
+    cv2.rectangle(canvas, (x1, y1), (x2, y2), LABEL_COLORS["closed"], 3)
+    cv2.line(canvas, (x1 + 24, y1 + 24), (x2 - 24, y2 - 24), WHITE, 4)
+    cv2.line(canvas, (x2 - 24, y1 + 24), (x1 + 24, y2 - 24), WHITE, 4)
+
+
+def handle_mouse(event, x, y, flags, param):
+    """Allow the fullscreen UI to close from a touch or mouse click."""
+    del flags, param
+    global exit_requested
+
+    if event != cv2.EVENT_LBUTTONUP:
+        return
+
+    x1, y1, x2, y2 = close_button_rect
+    if x1 <= x <= x2 and y1 <= y <= y2:
+        exit_requested = True
 
 
 def build_status_summary(target, frame_width):
@@ -334,7 +348,6 @@ def build_status_summary(target, frame_width):
         return {
             "target": None,
             "cards": cards,
-            "overlay_pills": [cards["door"], cards["clearance"], cards["guidance"]],
             "message": "No passable door detected",
             "message_color": TURN_COLOR,
         }
@@ -446,7 +459,6 @@ def build_status_summary(target, frame_width):
     return {
         "target": target,
         "cards": cards,
-        "overlay_pills": [door_card, clearance_card, guidance_card],
         "message": message,
         "message_color": message_color,
     }
@@ -489,6 +501,8 @@ def render_portrait_display(camera_frame, summary, fps):
     cv2.putText(canvas, f"Chair {WHEELCHAIR_WIDTH_MM} mm + {WIDTH_BUFFER_MM} mm buffer",
                 (dash_left, footer_y + 46), cv2.FONT_HERSHEY_SIMPLEX, 0.7, UI_MUTED, 2)
 
+    draw_close_button(canvas)
+
     return canvas
 
 
@@ -523,9 +537,9 @@ nn.setNumInferenceThreads(2)
 nn.input.setBlocking(False)
 rgbOut.link(nn.input)
 
-qRgb   = rgbOut.createOutputQueue(maxSize=4, blocking=False)
-qDet   = nn.out.createOutputQueue(maxSize=4, blocking=False)
-qDepth = stereo.depth.createOutputQueue(maxSize=4, blocking=False)
+qRgb   = rgbOut.createOutputQueue(maxSize=1, blocking=False)
+qDet   = nn.out.createOutputQueue(maxSize=1, blocking=False)
+qDepth = stereo.depth.createOutputQueue(maxSize=1, blocking=False)
 
 # ---------------------------------------------------------------------------
 # Run
@@ -555,50 +569,56 @@ print("Running, press 'q' to quit.")
 
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(WINDOW_NAME, SCREEN_W, SCREEN_H)
+cv2.setMouseCallback(WINDOW_NAME, handle_mouse)
 try:
     cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 except (cv2.error, AttributeError):
     pass
 
+last_rgb = None
+last_det = None
+last_depth = None
+last_display_frame = None
+
 try:
     while pipeline.isRunning():
-        inRgb   = qRgb.tryGet()
-        inDet   = qDet.tryGet()
-        inDepth = qDepth.tryGet()
+        newest_rgb = drain_latest(qRgb)
+        newest_det = drain_latest(qDet)
+        newest_depth = drain_latest(qDepth)
+        if newest_rgb is not None:
+            last_rgb = newest_rgb
+        if newest_det is not None:
+            last_det = newest_det
+        if newest_depth is not None:
+            last_depth = newest_depth
 
-        if inRgb is None or inDet is None or inDepth is None:
-            print(f"[WAIT] rgb={inRgb is not None}  det={inDet is not None}  depth={inDepth is not None}", flush=True)
+        if exit_requested:
+            break
+
+        try:
+            if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                break
+        except (cv2.error, AttributeError):
+            pass
+
+        if last_rgb is None or last_det is None or last_depth is None:
             wait_frame = np.full((CAM_H, CAM_W, 3), UI_PANEL_DARK, dtype=np.uint8)
-            wait_text = (
-                f"RGB {'OK' if inRgb is not None else '--'}   "
-                f"NN {'OK' if inDet is not None else '--'}   "
-                f"DEPTH {'OK' if inDepth is not None else '--'}"
-            )
-            title_text = "STARTING DOORWAY UI"
-            title_scale = fit_text_scale("STARTING DOORWAY UI", CAM_W - 80, 1.05, 3)
-            (title_w, _), _ = cv2.getTextSize(title_text, cv2.FONT_HERSHEY_SIMPLEX, title_scale, 3)
-            cv2.putText(wait_frame, title_text, ((CAM_W - title_w) // 2, CAM_H // 2 - 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, title_scale, WHITE, 3)
-            wait_scale = fit_text_scale(wait_text, CAM_W - 80, 0.78, 2)
-            (wait_w, _), _ = cv2.getTextSize(wait_text, cv2.FONT_HERSHEY_SIMPLEX, wait_scale, 2)
-            cv2.putText(wait_frame, wait_text, ((CAM_W - wait_w) // 2, CAM_H // 2 + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, wait_scale, UI_MUTED, 2)
-
             summary = build_status_summary(None, CAM_W)
-            summary["message"] = "Waiting for RGB, depth, and neural network output"
+            summary["message"] = "Starting camera and doorway detection"
             summary["message_color"] = UI_MUTED
             display_frame = render_portrait_display(wait_frame, summary, fps)
+            last_display_frame = display_frame
             cv2.imshow(WINDOW_NAME, display_frame)
             if cv2.waitKey(1) == ord("q"):
                 break
             continue
 
         if not printed_layers:
-            print("NN output layers:", inDet.getAllLayerNames())
+            print("NN output layers:", last_det.getAllLayerNames())
             printed_layers = True
 
-        frame      = inRgb.getCvFrame()
-        depthFrame = inDepth.getFrame()   # uint16, values in mm
+        frame      = last_rgb.getCvFrame()
+        depthFrame = last_depth.getFrame()   # uint16, values in mm
         h, w       = frame.shape[:2]
 
         if depthFrame.shape[:2] != (h, w):
@@ -613,12 +633,12 @@ try:
             start  = time.monotonic()
 
         # Parse detections
-        layer_names = inDet.getAllLayerNames()
+        layer_names = last_det.getAllLayerNames()
         tensor_name = "output0" if "output0" in layer_names else (layer_names[0] if layer_names else None)
         detections  = []
         if tensor_name:
             try:
-                tensor = np.array(inDet.getTensor(tensor_name), dtype=np.float32)
+                tensor = np.array(last_det.getTensor(tensor_name), dtype=np.float32)
                 if tensor.ndim == 3:
                     tensor = tensor[0]
                 detections = parse_yolov8(tensor, CONFIDENCE_THRESH, IOU_THRESH, w, h)
@@ -718,8 +738,8 @@ try:
                               focal_px, d["z_centre"], d["angle_deg"])
 
         summary = build_status_summary(primary_target, w)
-        draw_overlay_pills(frame, summary)
         display_frame = render_portrait_display(frame, summary, fps)
+        last_display_frame = display_frame
 
         cv2.imshow(WINDOW_NAME, display_frame)
 
