@@ -200,21 +200,21 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angl
 
     # ── 2. Ideal curved path: orange bezier guides toward the door ────────────
     # Show the user the corridor they need to steer into to reach the door.
-    outer_bw = max(90, int(w * 0.29))  # starting x-offset at bottom for the outer guides
-    curve_mid_y = h - int((h - y2) * 0.38)
+    door_half_w = max(40, (x2 - x1) // 2)
+    forward_dist = h - y2
 
     # Left orange guide: bottom-left → left edge of door
-    PL0 = (cx - outer_bw, h)
-    PL1 = (cx - outer_bw, curve_mid_y)
-    PL2 = (x1, y2 + int((h - y2) * 0.35))
+    PL0 = (cx - door_half_w, h)
+    PL1 = (cx - door_half_w + int((x1 - (cx - door_half_w)) * 0.9), h - int(forward_dist * 0.25))
+    PL2 = (x1, y2 + int(forward_dist * 0.6))
     PL3 = (x1, y2)
     pts_l = bezier_cubic(PL0, PL1, PL2, PL3)
     cv2.polylines(frame, [np.array(pts_l, dtype=np.int32)], False, PATH_ORANGE, 3)
 
     # Right orange guide: bottom-right → right edge of door
-    PR0 = (cx + outer_bw, h)
-    PR1 = (cx + outer_bw, curve_mid_y)
-    PR2 = (x2, y2 + int((h - y2) * 0.35))
+    PR0 = (cx + door_half_w, h)
+    PR1 = (cx + door_half_w + int((x2 - (cx + door_half_w)) * 0.9), h - int(forward_dist * 0.25))
+    PR2 = (x2, y2 + int(forward_dist * 0.6))
     PR3 = (x2, y2)
     pts_r = bezier_cubic(PR0, PR1, PR2, PR3)
     cv2.polylines(frame, [np.array(pts_r, dtype=np.int32)], False, PATH_ORANGE, 3)
