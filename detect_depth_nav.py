@@ -573,7 +573,7 @@ qDepth = stereo.depth.createOutputQueue(maxSize=1, blocking=False)
 # ── Person-tracking branch (parallel to door-detection branch) ────────────
 if PERSON_TRACKING:
     personManip = pipeline.create(dai.node.ImageManip)
-    personManip.initialConfig.setResize(300, 300)
+    personManip.initialConfig.addResize(300, 300)
     personManip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
     personManip.setMaxOutputFrameSize(300 * 300 * 3)
     personManip.inputImage.setBlocking(False)
