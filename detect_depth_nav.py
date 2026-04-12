@@ -232,23 +232,37 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angl
 
     if blocking is not None:
         bx1, by1, bx2, by2 = blocking
-        wp_x = min(bx2 + OBSTACLE_MARGIN, w - 1)
-        wp_y = (by1 + by2) // 2
+        wp_y       = (by1 + by2) // 2
+        door_width = x2 - x1
+        WP_L = (min(bx2 + OBSTACLE_MARGIN, w - 1), wp_y)
+        WP_R = (min(bx2 + OBSTACLE_MARGIN + door_width, w - 1), wp_y)
 
-        # Segment 1: wheelchair bottom → right side of chair
-        S1_P0 = (cx, h)
-        S1_P1 = (cx, h - int((h - wp_y) * 0.5))
-        S1_P2 = (wp_x, wp_y + int((by2 - by1) * 0.4))
-        S1_P3 = (wp_x, wp_y)
+        def _draw_two_seg(p0, p1, p2, p3, p4, p5, p6, p7):
+            cv2.polylines(frame, [np.array(bezier_cubic(p0, p1, p2, p3), dtype=np.int32)], False, DIVERT_COLOR, 3)
+            cv2.polylines(frame, [np.array(bezier_cubic(p4, p5, p6, p7), dtype=np.int32)], False, DIVERT_COLOR, 3)
 
-        # Segment 2: right side of chair → door centre bottom
-        S2_P0 = (wp_x, wp_y)
-        S2_P1 = (wp_x, wp_y - int((wp_y - y2) * 0.4))
-        S2_P2 = (door_cx, y2 + int((wp_y - y2) * 0.4))
-        S2_P3 = (door_cx, y2)
-
-        cv2.polylines(frame, [np.array(bezier_cubic(S1_P0, S1_P1, S1_P2, S1_P3), dtype=np.int32)], False, DIVERT_COLOR, 3)
-        cv2.polylines(frame, [np.array(bezier_cubic(S2_P0, S2_P1, S2_P2, S2_P3), dtype=np.int32)], False, DIVERT_COLOR, 3)
+        # Left wall: bottom-left → WP_L → left door edge
+        _draw_two_seg(
+            (cx - door_half_w, h),
+            (cx - door_half_w, h - int((h - wp_y) * 0.5)),
+            (WP_L[0], wp_y + int((by2 - by1) * 0.4)),
+            WP_L,
+            WP_L,
+            (WP_L[0], wp_y - int((wp_y - y2) * 0.4)),
+            (x1, y2 + int((wp_y - y2) * 0.4)),
+            (x1, y2),
+        )
+        # Right wall: bottom-right → WP_R → right door edge
+        _draw_two_seg(
+            (cx + door_half_w, h),
+            (cx + door_half_w, h - int((h - wp_y) * 0.5)),
+            (WP_R[0], wp_y + int((by2 - by1) * 0.4)),
+            WP_R,
+            WP_R,
+            (WP_R[0], wp_y - int((wp_y - y2) * 0.4)),
+            (x2, y2 + int((wp_y - y2) * 0.4)),
+            (x2, y2),
+        )
         cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 0, 220), 3)
         cv2.putText(frame, "OBSTACLE", (bx1 + 4, by1 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 220), 2)
