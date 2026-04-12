@@ -266,6 +266,13 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angl
         cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 0, 220), 3)
         cv2.putText(frame, "OBSTACLE", (bx1 + 4, by1 - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 220), 2)
+
+        if not aligned:
+            turn_text = "TURN RIGHT" if door_cx > cx else "TURN LEFT"
+            (tw_px, _), _ = cv2.getTextSize(turn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+            mid_y = h - int((h - wp_y) * 0.5)
+            cv2.putText(frame, turn_text, (cx - tw_px // 2, mid_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, DIVERT_COLOR, 2)
     else:
         # Normal corridor guide curves
         # Left orange guide: bottom-left → left edge of door
@@ -887,8 +894,23 @@ try:
                               focal_px, d["z_centre"], d["angle_deg"],
                               chair_boxes=chair_boxes)
 
+        # ── Filter to chairs that overlap the nav corridor ────────────────
+        if primary_target is not None:
+            _cx    = w // 2
+            _half  = max(40, (primary_target["x2"] - primary_target["x1"]) // 2)
+            _cor_x1 = _cx - _half
+            _cor_x2 = _cx + _half
+            _door_y2 = primary_target["y2"]
+            in_path_chairs = [
+                b for b in chair_boxes
+                if b[3] >= _door_y2
+                and max(0, min(b[2], _cor_x2) - max(b[0], _cor_x1)) > 0
+            ]
+        else:
+            in_path_chairs = []
+
         # ── Overlay detected chairs on camera frame ───────────────────────
-        for (bx1, by1, bx2, by2) in chair_boxes:
+        for (bx1, by1, bx2, by2) in in_path_chairs:
             cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 0, 0), 4)
             cv2.rectangle(frame, (bx1, by1), (bx2, by2), CHAIR_COLOR, 2)
             cv2.putText(frame, "Chair", (bx1 + 6, by1 + 20),
