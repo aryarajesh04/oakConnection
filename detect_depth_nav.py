@@ -577,22 +577,31 @@ if PERSON_TRACKING:
     personManip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
     personManip.setMaxOutputFrameSize(300 * 300 * 3)
     personManip.inputImage.setBlocking(False)
-    personManip.inputImage.setQueueSize(1)
+    personManip.inputImage.setMaxSize(1)
 
     personNN = pipeline.create(dai.node.MobileNetDetectionNetwork)
     personNN.setBlobPath(MOBILENET_BLOB)
     personNN.setConfidenceThreshold(0.5)
     personNN.setNumInferenceThreads(1)
     personNN.input.setBlocking(False)
-    personNN.input.setQueueSize(1)
+    personNN.input.setMaxSize(1)
 
     personTracker = pipeline.create(dai.node.ObjectTracker)
     personTracker.setDetectionLabelsToTrack([15])  # 15 = person in MobileNet-SSD
     personTracker.setTrackerType(dai.TrackerType.ZERO_TERM_COLOR_HISTOGRAM)
     personTracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
-    personTracker.setOcclusionRatioThreshold(0.4)
-    personTracker.setTrackletMaxLifespan(120)
-    personTracker.setTrackletBirthThreshold(3)
+    try:
+        personTracker.setOcclusionRatioThreshold(0.4)
+    except AttributeError:
+        pass
+    try:
+        personTracker.setTrackletMaxLifespan(120)
+    except AttributeError:
+        pass
+    try:
+        personTracker.setTrackletBirthThreshold(3)
+    except AttributeError:
+        pass
 
     # rgbOut fans out to personManip (already linked to nn.input and qRgb)
     rgbOut.link(personManip.inputImage)
