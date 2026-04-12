@@ -51,10 +51,12 @@ CLOSE_BTN_PAD     = 18
 MOBILENET_BLOB  = sys.argv[2] if len(sys.argv) > 2 else str(
     (Path(__file__).parent / "../models/mobilenet-ssd_openvino_2021.4_6shave.blob").resolve()
 )
-PERSON_TRACKING = Path(MOBILENET_BLOB).exists()
-PERSON_COLOR    = (0, 200, 255)   # BGR yellow-amber for person boxes
-if not PERSON_TRACKING:
-    print(f"[INFO] MobileNet blob not found -- person tracking disabled. ({MOBILENET_BLOB})")
+CHAIR_DETECTION = Path(MOBILENET_BLOB).exists()
+CHAIR_COLOR     = (0, 255, 180)   # BGR green-cyan for chair boxes
+CHAIR_LABEL_IDX = 9               # index 9 = "chair" in MobileNet-SSD label map
+CHAIR_CONF_THRESH = 0.5
+if not CHAIR_DETECTION:
+    print(f"[INFO] MobileNet blob not found -- chair detection disabled. ({MOBILENET_BLOB})")
 
 WHITE             = (255, 255, 255)
 UI_BG             = (18, 24, 34)
@@ -570,47 +572,32 @@ qRgb   = rgbOut.createOutputQueue(maxSize=1, blocking=False)
 qDet   = nn.out.createOutputQueue(maxSize=1, blocking=False)
 qDepth = stereo.depth.createOutputQueue(maxSize=1, blocking=False)
 
-# ── Person-tracking branch (parallel to door-detection branch) ────────────
-if PERSON_TRACKING:
-    personManip = pipeline.create(dai.node.ImageManip)
-    personManip.initialConfig.setOutputSize(300, 300)
-    personManip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
-    personManip.setMaxOutputFrameSize(300 * 300 * 3)
-    personManip.inputImage.setBlocking(False)
-    personManip.inputImage.setMaxSize(1)
-
-    personNN = pipeline.create(dai.node.MobileNetDetectionNetwork)
-    personNN.setBlobPath(MOBILENET_BLOB)
-    personNN.setConfidenceThreshold(0.5)
-    personNN.setNumInferenceThreads(1)
-    personNN.input.setBlocking(False)
-    personNN.input.setMaxSize(1)
-
-    personTracker = pipeline.create(dai.node.ObjectTracker)
-    personTracker.setDetectionLabelsToTrack([15])  # 15 = person in MobileNet-SSD
-    personTracker.setTrackerType(dai.TrackerType.ZERO_TERM_COLOR_HISTOGRAM)
-    personTracker.setTrackerIdAssignmentPolicy(dai.TrackerIdAssignmentPolicy.SMALLEST_ID)
+# ── Chair-detection branch (parallel to door-detection branch) ────────────
+if CHAIR_DETECTION:
     try:
-        personTracker.setOcclusionRatioThreshold(0.4)
-    except AttributeError:
-        pass
-    try:
-        personTracker.setTrackletMaxLifespan(120)
-    except AttributeError:
-        pass
-    try:
-        personTracker.setTrackletBirthThreshold(3)
-    except AttributeError:
-        pass
+        chairManip = pipeline.create(dai.node.ImageManip)
+        chairManip.initialConfig.setOutputSize(300, 300)
+        try:
+            chairManip.initialConfig.setFrameType(dai.ImgFrame.Type.BGR888p)
+        except AttributeError:
+            pass
+        chairManip.setMaxOutputFrameSize(300 * 300 * 3)
+        chairManip.inputImage.setBlocking(False)
+        chairManip.inputImage.setMaxSize(1)
 
-    # rgbOut fans out to personManip (already linked to nn.input and qRgb)
-    rgbOut.link(personManip.inputImage)
-    personManip.out.link(personNN.input)
-    personNN.passthrough.link(personTracker.inputTrackerFrame)
-    personNN.passthrough.link(personTracker.inputDetectionFrame)
-    personNN.out.link(personTracker.inputDetections)
+        chairNN = pipeline.create(dai.node.NeuralNetwork)
+        chairNN.setBlobPath(MOBILENET_BLOB)
+        chairNN.setNumInferenceThreads(1)
+        chairNN.input.setBlocking(False)
+        chairNN.input.setMaxSize(1)
 
-    qTracklets = personTracker.out.createOutputQueue(maxSize=1, blocking=False)
+        rgbOut.link(chairManip.inputImage)
+        chairManip.out.link(chairNN.input)
+
+        qChair = chairNN.out.createOutputQueue(maxSize=1, blocking=False)
+    except AttributeError as e:
+        print(f"[INFO] Chair detection disabled -- node not supported in this depthai version: {e}")
+        CHAIR_DETECTION = False
 
 # ---------------------------------------------------------------------------
 # Run
@@ -650,7 +637,7 @@ last_rgb = None
 last_det = None
 last_depth = None
 last_display_frame = None
-last_tracklets = None
+last_chair = None
 
 try:
     while pipeline.isRunning():
@@ -663,10 +650,10 @@ try:
             last_det = newest_det
         if newest_depth is not None:
             last_depth = newest_depth
-        if PERSON_TRACKING:
-            newest_tracklets = drain_latest(qTracklets)
-            if newest_tracklets is not None:
-                last_tracklets = newest_tracklets
+        if CHAIR_DETECTION:
+            newest_chair = drain_latest(qChair)
+            if newest_chair is not None:
+                last_chair = newest_chair
 
         if exit_requested:
             break
@@ -822,34 +809,39 @@ try:
                               d["label"], d["color"],
                               focal_px, d["z_centre"], d["angle_deg"])
 
-        # ── Overlay tracked persons on camera frame ───────────────────────
-        person_count = 0
-        if PERSON_TRACKING and last_tracklets is not None:
-            for t in last_tracklets.tracklets:
-                if t.status == dai.Tracklet.TrackingStatus.LOST:
-                    continue
-                roi  = t.roi.denormalize(CAM_W, CAM_H)
-                px1  = max(0, int(roi.topLeft().x))
-                py1  = max(0, int(roi.topLeft().y))
-                px2  = min(CAM_W - 1, int(roi.bottomRight().x))
-                py2  = min(CAM_H - 1, int(roi.bottomRight().y))
-                if t.status == dai.Tracklet.TrackingStatus.TRACKED:
-                    person_count += 1
-                col = PERSON_COLOR if t.status == dai.Tracklet.TrackingStatus.TRACKED else (80, 80, 80)
-                cv2.rectangle(frame, (px1, py1), (px2, py2), (0, 0, 0), 4)
-                cv2.rectangle(frame, (px1, py1), (px2, py2), col, 2)
-                cv2.putText(frame, f"ID {t.id}", (px1 + 6, py1 + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
-                cv2.putText(frame, f"ID {t.id}", (px1 + 6, py1 + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
+        # ── Overlay detected chairs on camera frame ───────────────────────
+        chair_count = 0
+        if CHAIR_DETECTION and last_chair is not None:
+            try:
+                layer_names = last_chair.getAllLayerNames()
+                tensor_name = layer_names[0] if layer_names else None
+                if tensor_name:
+                    arr = np.array(last_chair.getTensor(tensor_name), dtype=np.float32).reshape(-1, 7)
+                    for det in arr:
+                        _, label_id, conf, x1n, y1n, x2n, y2n = det
+                        if conf < CHAIR_CONF_THRESH or int(label_id) != CHAIR_LABEL_IDX:
+                            continue
+                        chair_count += 1
+                        cx1 = max(0, int(x1n * CAM_W))
+                        cy1 = max(0, int(y1n * CAM_H))
+                        cx2 = min(CAM_W - 1, int(x2n * CAM_W))
+                        cy2 = min(CAM_H - 1, int(y2n * CAM_H))
+                        cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), (0, 0, 0), 4)
+                        cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), CHAIR_COLOR, 2)
+                        cv2.putText(frame, f"Chair {int(conf*100)}%", (cx1 + 6, cy1 + 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+                        cv2.putText(frame, f"Chair {int(conf*100)}%", (cx1 + 6, cy1 + 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, CHAIR_COLOR, 2)
+            except Exception as e:
+                print(f"[WARN] Chair detection parse error: {e}", flush=True)
 
-        if PERSON_TRACKING:
-            badge = f"Persons: {person_count}"
+        if CHAIR_DETECTION:
+            badge = f"Chairs: {chair_count}"
             (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             bx = CAM_W - bw - 12
             by = 28
             cv2.rectangle(frame, (bx - 6, by - bh - 4), (bx + bw + 6, by + 4), (0, 0, 0), -1)
-            cv2.putText(frame, badge, (bx, by), cv2.FONT_HERSHEY_SIMPLEX, 0.6, PERSON_COLOR, 2)
+            cv2.putText(frame, badge, (bx, by), cv2.FONT_HERSHEY_SIMPLEX, 0.6, CHAIR_COLOR, 2)
 
         summary = build_status_summary(primary_target, w)
         display_frame = render_portrait_display(frame, summary, fps)
