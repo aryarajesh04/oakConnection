@@ -54,7 +54,7 @@ MOBILENET_BLOB  = sys.argv[2] if len(sys.argv) > 2 else str(
 PERSON_TRACKING = Path(MOBILENET_BLOB).exists()
 PERSON_COLOR    = (0, 200, 255)   # BGR yellow-amber for person boxes
 if not PERSON_TRACKING:
-    print(f"[INFO] MobileNet blob not found — person tracking disabled. ({MOBILENET_BLOB})")
+    print(f"[INFO] MobileNet blob not found -- person tracking disabled. ({MOBILENET_BLOB})")
 
 WHITE             = (255, 255, 255)
 UI_BG             = (18, 24, 34)
