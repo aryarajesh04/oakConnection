@@ -180,12 +180,25 @@ def bezier_cubic(p0, p1, p2, p3, n=60):
     return pts
 
 
-def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angle_deg):
+def find_blocking_chair(chair_boxes, corridor_x1, corridor_x2, door_y2, frame_h):
+    """Return the chair with the most horizontal overlap with the nav corridor, or None."""
+    best, best_overlap = None, 0
+    for (bx1, by1, bx2, by2) in chair_boxes:
+        if by2 < door_y2 or by1 > frame_h:
+            continue
+        overlap = max(0, min(bx2, corridor_x2) - max(bx1, corridor_x1))
+        if overlap > best_overlap:
+            best_overlap, best = overlap, (bx1, by1, bx2, by2)
+    return best
+
+
+def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angle_deg, chair_boxes=None):
     """
     Overlay a reverse-camera-style navigation path.
 
-    - Straight path (blue filled trapezoid + red borders): current heading direction.
     - Ideal path (orange bezier curves): the path to steer toward the door.
+    - Diversion path (yellow bezier curves): when a chair blocks the corridor,
+      curves right of the chair then reconnects to the door.
     - closed → red X + "BLOCKED"
     """
     h, w = frame.shape[:2]
@@ -203,39 +216,67 @@ def draw_nav_path(frame, x1, y1, x2, y2, label, color, focal_px, z_centre, _angl
     cx = w // 2
 
     PATH_ORANGE = (0, 140, 255)  # BGR — orange ideal-path guides
+    DIVERT_COLOR = (0, 220, 255)  # BGR — yellow diversion path
+    OBSTACLE_MARGIN = 30
     arrow_color = LABEL_COLORS["open"] if aligned else PATH_ORANGE
 
     # ── 1. Small upward arrow showing current heading ─────────────────────────
     cv2.arrowedLine(frame, (cx, h - 20), (cx, h - 70), arrow_color, 2, tipLength=0.3)
 
-    # ── 2. Ideal curved path: orange bezier guides toward the door ────────────
-    # Show the user the corridor they need to steer into to reach the door.
+    # ── 2. Path toward door (with optional chair diversion) ───────────────────
     door_half_w = max(40, (x2 - x1) // 2)
     forward_dist = h - y2
 
-    # Left orange guide: bottom-left → left edge of door
-    PL0 = (cx - door_half_w, h)
-    PL1 = (cx - door_half_w + int((x1 - (cx - door_half_w)) * 0.9), h - int(forward_dist * 0.25))
-    PL2 = (x1, y2 + int(forward_dist * 0.6))
-    PL3 = (x1, y2)
-    pts_l = bezier_cubic(PL0, PL1, PL2, PL3)
-    cv2.polylines(frame, [np.array(pts_l, dtype=np.int32)], False, PATH_ORANGE, 3)
+    blocking = find_blocking_chair(
+        chair_boxes or [], cx - door_half_w, cx + door_half_w, y2, h)
 
-    # Right orange guide: bottom-right → right edge of door
-    PR0 = (cx + door_half_w, h)
-    PR1 = (cx + door_half_w + int((x2 - (cx + door_half_w)) * 0.9), h - int(forward_dist * 0.25))
-    PR2 = (x2, y2 + int(forward_dist * 0.6))
-    PR3 = (x2, y2)
-    pts_r = bezier_cubic(PR0, PR1, PR2, PR3)
-    cv2.polylines(frame, [np.array(pts_r, dtype=np.int32)], False, PATH_ORANGE, 3)
+    if blocking is not None:
+        bx1, by1, bx2, by2 = blocking
+        wp_x = min(bx2 + OBSTACLE_MARGIN, w - 1)
+        wp_y = (by1 + by2) // 2
 
-    # Turn instruction when not aligned
-    if not aligned:
-        turn_text = "TURN RIGHT" if door_cx > cx else "TURN LEFT"
-        (tw_px, _), _ = cv2.getTextSize(turn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
-        mid_pt = pts_l[len(pts_l) // 2] if door_cx < cx else pts_r[len(pts_r) // 2]
-        cv2.putText(frame, turn_text, (cx - tw_px // 2, mid_pt[1]),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, PATH_ORANGE, 2)
+        # Segment 1: wheelchair bottom → right side of chair
+        S1_P0 = (cx, h)
+        S1_P1 = (cx, h - int((h - wp_y) * 0.5))
+        S1_P2 = (wp_x, wp_y + int((by2 - by1) * 0.4))
+        S1_P3 = (wp_x, wp_y)
+
+        # Segment 2: right side of chair → door centre bottom
+        S2_P0 = (wp_x, wp_y)
+        S2_P1 = (wp_x, wp_y - int((wp_y - y2) * 0.4))
+        S2_P2 = (door_cx, y2 + int((wp_y - y2) * 0.4))
+        S2_P3 = (door_cx, y2)
+
+        cv2.polylines(frame, [np.array(bezier_cubic(S1_P0, S1_P1, S1_P2, S1_P3), dtype=np.int32)], False, DIVERT_COLOR, 3)
+        cv2.polylines(frame, [np.array(bezier_cubic(S2_P0, S2_P1, S2_P2, S2_P3), dtype=np.int32)], False, DIVERT_COLOR, 3)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 0, 220), 3)
+        cv2.putText(frame, "OBSTACLE", (bx1 + 4, by1 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 220), 2)
+    else:
+        # Normal corridor guide curves
+        # Left orange guide: bottom-left → left edge of door
+        PL0 = (cx - door_half_w, h)
+        PL1 = (cx - door_half_w + int((x1 - (cx - door_half_w)) * 0.9), h - int(forward_dist * 0.25))
+        PL2 = (x1, y2 + int(forward_dist * 0.6))
+        PL3 = (x1, y2)
+        pts_l = bezier_cubic(PL0, PL1, PL2, PL3)
+        cv2.polylines(frame, [np.array(pts_l, dtype=np.int32)], False, PATH_ORANGE, 3)
+
+        # Right orange guide: bottom-right → right edge of door
+        PR0 = (cx + door_half_w, h)
+        PR1 = (cx + door_half_w + int((x2 - (cx + door_half_w)) * 0.9), h - int(forward_dist * 0.25))
+        PR2 = (x2, y2 + int(forward_dist * 0.6))
+        PR3 = (x2, y2)
+        pts_r = bezier_cubic(PR0, PR1, PR2, PR3)
+        cv2.polylines(frame, [np.array(pts_r, dtype=np.int32)], False, PATH_ORANGE, 3)
+
+        # Turn instruction when not aligned
+        if not aligned:
+            turn_text = "TURN RIGHT" if door_cx > cx else "TURN LEFT"
+            (tw_px, _), _ = cv2.getTextSize(turn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+            mid_pt = pts_l[len(pts_l) // 2] if door_cx < cx else pts_r[len(pts_r) // 2]
+            cv2.putText(frame, turn_text, (cx - tw_px // 2, mid_pt[1]),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, PATH_ORANGE, 2)
 
 
 def detection_score(det):
@@ -792,24 +833,8 @@ try:
         # ------------------------------------------------------------------
         # Pass 2 — draw nav path for the primary open/semi door only;
         #          draw X/BLOCKED for every closed door
-        # ------------------------------------------------------------------
-        primary_target = select_primary_target(det_data)
-
-        if primary_target is not None and primary_target["label"] in ("open", "semi"):
-            draw_nav_path(frame,
-                          primary_target["x1"], primary_target["y1"],
-                          primary_target["x2"], primary_target["y2"],
-                          primary_target["label"], primary_target["color"],
-                          focal_px, primary_target["z_centre"], primary_target["angle_deg"])
-
-        for d in det_data:
-            if d["label"] == "closed":
-                draw_nav_path(frame,
-                              d["x1"], d["y1"], d["x2"], d["y2"],
-                              d["label"], d["color"],
-                              focal_px, d["z_centre"], d["angle_deg"])
-
-        # ── Overlay detected chairs on camera frame ───────────────────────
+        # ── Parse chair detections for obstacle avoidance ─────────────────
+        chair_boxes = []
         chair_count = 0
         if CHAIR_DETECTION and last_chair is not None:
             try:
@@ -822,18 +847,40 @@ try:
                         if conf < CHAIR_CONF_THRESH or int(label_id) != CHAIR_LABEL_IDX:
                             continue
                         chair_count += 1
-                        cx1 = max(0, int(x1n * CAM_W))
-                        cy1 = max(0, int(y1n * CAM_H))
-                        cx2 = min(CAM_W - 1, int(x2n * CAM_W))
-                        cy2 = min(CAM_H - 1, int(y2n * CAM_H))
-                        cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), (0, 0, 0), 4)
-                        cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), CHAIR_COLOR, 2)
-                        cv2.putText(frame, f"Chair {int(conf*100)}%", (cx1 + 6, cy1 + 20),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
-                        cv2.putText(frame, f"Chair {int(conf*100)}%", (cx1 + 6, cy1 + 20),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, CHAIR_COLOR, 2)
+                        chair_boxes.append((
+                            max(0, int(x1n * CAM_W)), max(0, int(y1n * CAM_H)),
+                            min(CAM_W - 1, int(x2n * CAM_W)), min(CAM_H - 1, int(y2n * CAM_H)),
+                        ))
             except Exception as e:
                 print(f"[WARN] Chair detection parse error: {e}", flush=True)
+
+        # ------------------------------------------------------------------
+        primary_target = select_primary_target(det_data)
+
+        if primary_target is not None and primary_target["label"] in ("open", "semi"):
+            draw_nav_path(frame,
+                          primary_target["x1"], primary_target["y1"],
+                          primary_target["x2"], primary_target["y2"],
+                          primary_target["label"], primary_target["color"],
+                          focal_px, primary_target["z_centre"], primary_target["angle_deg"],
+                          chair_boxes=chair_boxes)
+
+        for d in det_data:
+            if d["label"] == "closed":
+                draw_nav_path(frame,
+                              d["x1"], d["y1"], d["x2"], d["y2"],
+                              d["label"], d["color"],
+                              focal_px, d["z_centre"], d["angle_deg"],
+                              chair_boxes=chair_boxes)
+
+        # ── Overlay detected chairs on camera frame ───────────────────────
+        for (bx1, by1, bx2, by2) in chair_boxes:
+            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 0, 0), 4)
+            cv2.rectangle(frame, (bx1, by1), (bx2, by2), CHAIR_COLOR, 2)
+            cv2.putText(frame, "Chair", (bx1 + 6, by1 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
+            cv2.putText(frame, "Chair", (bx1 + 6, by1 + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, CHAIR_COLOR, 2)
 
         if CHAIR_DETECTION:
             badge = f"Chairs: {chair_count}"
